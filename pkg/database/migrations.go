@@ -410,7 +410,17 @@ func (db *Database) getMigrations(ctx context.Context) *gormigrate.Gormigrate {
 			},
 		},
 		{
-			ID: "00017-IncreaseAPIKeySize",
+			ID: "00017-AddAPIKeyPreviewAuthApp",
+			Migrate: func(tx *gorm.DB) error {
+				logger.Infof("db migrations: migrating authapp")
+				return tx.AutoMigrate(AuthorizedApp{}).Error
+			},
+			Rollback: func(tx *gorm.DB) error {
+				return nil
+			},
+		},
+		{
+			ID: "00018-IncreaseAPIKeySize",
 			Migrate: func(tx *gorm.DB) error {
 				logger.Infof("db migrations: increasing API key size")
 				sql := "ALTER TABLE authorized_apps ALTER COLUMN api_key TYPE varchar(512)"
@@ -422,7 +432,7 @@ func (db *Database) getMigrations(ctx context.Context) *gormigrate.Gormigrate {
 			},
 		},
 		{
-			ID: "00018-HMACAPIKeys",
+			ID: "00019-HMACAPIKeys",
 			Migrate: func(tx *gorm.DB) error {
 				logger.Infof("db migrations: HMACing existing api keys")
 
