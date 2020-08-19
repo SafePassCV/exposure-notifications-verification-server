@@ -24,14 +24,18 @@ import (
 	"flag"
 	"fmt"
 	"net/http"
+	"os"
+	"strconv"
 	"time"
 
-	verifyapi "github.com/google/exposure-notifications-server/pkg/api/v1"
-	"github.com/google/exposure-notifications-server/pkg/util"
-	"github.com/google/exposure-notifications-server/pkg/verification"
 	"github.com/google/exposure-notifications-verification-server/pkg/clients"
 	"github.com/google/exposure-notifications-verification-server/pkg/jsonclient"
-	"github.com/google/exposure-notifications-verification-server/pkg/logging"
+
+	verifyapi "github.com/google/exposure-notifications-server/pkg/api/v1"
+	"github.com/google/exposure-notifications-server/pkg/logging"
+	"github.com/google/exposure-notifications-server/pkg/util"
+	"github.com/google/exposure-notifications-server/pkg/verification"
+
 	"github.com/sethvargo/go-envconfig"
 	"github.com/sethvargo/go-signalcontext"
 )
@@ -62,10 +66,13 @@ func timeToInterval(t time.Time) int32 {
 func main() {
 	ctx, done := signalcontext.OnInterrupt()
 
+	debug, _ := strconv.ParseBool(os.Getenv("LOG_DEBUG"))
+	logger := logging.NewLogger(debug)
+	ctx = logging.WithLogger(ctx, logger)
+
 	err := realMain(ctx)
 	done()
 
-	logger := logging.FromContext(ctx)
 	if err != nil {
 		logger.Fatal(err)
 	}
@@ -83,10 +90,10 @@ func realMain(ctx context.Context) error {
 	verbose := flag.Bool("v", false, "ALL THE MESSAGES!")
 	flag.Parse()
 
-	reportType := "confirmed"
+	testType := "confirmed"
 	iterations := 1
 	if *doRevision {
-		reportType = "likely"
+		testType = "likely"
 		iterations++
 	}
 	symptomDate := time.Now().UTC().Add(-48 * time.Hour).Format("2006-01-02")
@@ -109,7 +116,7 @@ func realMain(ctx context.Context) error {
 	for i := 0; i < iterations; i++ {
 		// Issue the verification code.
 		logger.Infof("Issuing verification code")
-		codeRequest, code, err := clients.IssueCode(ctx, config.VerificationAdminAPIServer, config.VerificationAdminAPIKey, reportType, symptomDate, timeout)
+		codeRequest, code, err := clients.IssueCode(ctx, config.VerificationAdminAPIServer, config.VerificationAdminAPIKey, testType, symptomDate, timeout)
 		if err != nil {
 			return fmt.Errorf("error issuing verification code: %w", err)
 		} else if code.Error != "" {
@@ -131,6 +138,20 @@ func realMain(ctx context.Context) error {
 		if *verbose {
 			logger.Infof("Token Request: %+v", tokenRequest)
 			logger.Infof("Token Response: %+v", token)
+		}
+
+		statusReq, codeStatus, err := clients.CheckCodeStatus(ctx, config.VerificationAdminAPIServer, config.VerificationAdminAPIKey, code.UUID, timeout)
+		if err != nil {
+			return fmt.Errorf("error issuing verification code: %w", err)
+		} else if codeStatus.Error != "" {
+			return fmt.Errorf("issue API Error: %+v", codeStatus)
+		}
+		if *verbose {
+			logger.Infof("Code Status Request: %+v", statusReq)
+			logger.Infof("Code Status Response: %+v", codeStatus)
+		}
+		if !codeStatus.Claimed {
+			return fmt.Errorf("expected claimed OTP code for %s", statusReq.UUID)
 		}
 
 		// Get the verification certificate
@@ -181,7 +202,7 @@ func realMain(ctx context.Context) error {
 		}
 
 		if *doRevision {
-			reportType = "confirmed"
+			testType = "confirmed"
 			revisionToken = response.RevisionToken
 
 			// Generate 1 more TEK

@@ -12,15 +12,23 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package observability sets up and configures observability tools.
-package observability
+// Package codestatus defines a web controller for the code status page of the verification
+// server. This view allows users to view the status of previously-issued OTP codes.
+package codestatus
 
-// Compile-time check to verify implements interface.
-var _ Exporter = (*NoopExporter)(nil)
+import (
+	"net/http"
 
-// NoopExporter is an observability exporter that does nothing.
-type NoopExporter struct{}
+	"github.com/google/exposure-notifications-verification-server/pkg/controller"
+)
 
-func (g *NoopExporter) InitExportOnce() error {
-	return nil
+func (c *Controller) HandleIndex() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+
+		m := controller.TemplateMapFromContext(ctx)
+		// TODO(whaught): load a list of recent codes to show
+
+		c.h.RenderHTML(w, "code/status", m)
+	})
 }

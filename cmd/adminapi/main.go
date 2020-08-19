@@ -12,43 +12,46 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// This server implements the device facing APIs for exchaning verification codes
-// for tokens and tokens for certificates.
+// This server implements the admin facing APIs for issuing diagnosis codes
+// and checking the status of previously issued codes.
 package main
 
 import (
 	"context"
-	"crypto/sha1"
 	"fmt"
-	"net/http"
 	"os"
-	"time"
+	"strconv"
 
 	"github.com/google/exposure-notifications-verification-server/pkg/config"
+	"github.com/google/exposure-notifications-verification-server/pkg/controller"
+	"github.com/google/exposure-notifications-verification-server/pkg/controller/codestatus"
 	"github.com/google/exposure-notifications-verification-server/pkg/controller/issueapi"
 	"github.com/google/exposure-notifications-verification-server/pkg/controller/middleware"
 	"github.com/google/exposure-notifications-verification-server/pkg/database"
-	"github.com/google/exposure-notifications-verification-server/pkg/logging"
-	"github.com/google/exposure-notifications-verification-server/pkg/observability"
+	"github.com/google/exposure-notifications-verification-server/pkg/ratelimit"
+	"github.com/google/exposure-notifications-verification-server/pkg/ratelimit/limitware"
 	"github.com/google/exposure-notifications-verification-server/pkg/render"
 
 	"github.com/google/exposure-notifications-server/pkg/cache"
+	"github.com/google/exposure-notifications-server/pkg/logging"
+	"github.com/google/exposure-notifications-server/pkg/observability"
 	"github.com/google/exposure-notifications-server/pkg/server"
 
 	"github.com/gorilla/handlers"
 	"github.com/gorilla/mux"
-	"github.com/sethvargo/go-limiter/httplimit"
-	"github.com/sethvargo/go-limiter/memorystore"
 	"github.com/sethvargo/go-signalcontext"
 )
 
 func main() {
 	ctx, done := signalcontext.OnInterrupt()
 
+	debug, _ := strconv.ParseBool(os.Getenv("LOG_DEBUG"))
+	logger := logging.NewLogger(debug)
+	ctx = logging.WithLogger(ctx, logger)
+
 	err := realMain(ctx)
 	done()
 
-	logger := logging.FromContext(ctx)
 	if err != nil {
 		logger.Fatal(err)
 	}
@@ -70,14 +73,18 @@ func realMain(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("unable to create ObservabilityExporter provider: %w", err)
 	}
-	if err := oe.InitExportOnce(); err != nil {
+	if err := oe.StartExporter(); err != nil {
 		return fmt.Errorf("error initializing observability exporter: %w", err)
 	}
+	defer oe.Close()
 	logger.Infow("observability exporter", "config", oeConfig)
 
 	// Setup database
-	db, err := config.Database.Open(ctx)
+	db, err := config.Database.Load(ctx)
 	if err != nil {
+		return fmt.Errorf("failed to load database config: %w", err)
+	}
+	if err := db.Open(ctx); err != nil {
 		return fmt.Errorf("failed to connect to database: %w", err)
 	}
 	defer db.Close()
@@ -85,27 +92,28 @@ func realMain(ctx context.Context) error {
 	// Create the router
 	r := mux.NewRouter()
 
-	// Setup rate limiter
-	store, err := memorystore.New(&memorystore.Config{
-		Tokens:   config.RateLimit,
-		Interval: 1 * time.Minute,
-	})
+	// Rate limiting
+	limiterStore, err := ratelimit.RateLimiterFor(ctx, &config.RateLimit)
 	if err != nil {
 		return fmt.Errorf("failed to create limiter: %w", err)
 	}
-	defer store.Close()
+	defer limiterStore.Close()
 
-	httplimiter, err := httplimit.NewMiddleware(store, apiKeyFunc())
+	httplimiter, err := limitware.NewMiddleware(ctx, limiterStore,
+		limitware.APIKeyFunc(ctx, "adminapi", db),
+		limitware.AllowOnError(false))
 	if err != nil {
 		return fmt.Errorf("failed to create limiter middleware: %w", err)
 	}
-	r.Use(httplimiter.Handle)
+	rateLimit := httplimiter.Handle
 
 	// Create the renderer
 	h, err := render.New(ctx, "", config.DevMode)
 	if err != nil {
 		return fmt.Errorf("failed to create renderer: %w", err)
 	}
+
+	r.Handle("/healthz", controller.HandleHealthz(ctx, h, &config.Database)).Methods("GET")
 
 	// Setup API auth
 	apiKeyCache, err := cache.New(config.APIKeyCacheDuration)
@@ -118,9 +126,13 @@ func realMain(ctx context.Context) error {
 
 	// Install the APIKey Auth Middleware
 	r.Use(requireAPIKey)
+	r.Use(rateLimit)
 
 	issueapiController := issueapi.New(ctx, config, db, h)
 	r.Handle("/api/issue", issueapiController.HandleIssue()).Methods("POST")
+
+	codeStatusController := codestatus.NewAPI(ctx, config, db, h)
+	r.Handle("/api/checkcodestatus", codeStatusController.HandleCheckCodeStatus()).Methods("POST")
 
 	srv, err := server.New(config.Port)
 	if err != nil {
@@ -128,19 +140,4 @@ func realMain(ctx context.Context) error {
 	}
 	logger.Infow("server listening", "port", config.Port)
 	return srv.ServeHTTPHandler(ctx, handlers.CombinedLoggingHandler(os.Stdout, r))
-}
-
-func apiKeyFunc() httplimit.KeyFunc {
-	ipKeyFunc := httplimit.IPKeyFunc("X-Forwarded-For")
-
-	return func(r *http.Request) (string, error) {
-		v := r.Header.Get("X-API-Key")
-		if v != "" {
-			dig := sha1.Sum([]byte(v))
-			return fmt.Sprintf("%x", dig), nil
-		}
-
-		// If no API key was provided, default to limiting by IP.
-		return ipKeyFunc(r)
-	}
 }

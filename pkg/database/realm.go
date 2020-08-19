@@ -16,167 +16,269 @@ package database
 
 import (
 	"fmt"
+	"strings"
+	"time"
 
 	"github.com/google/exposure-notifications-verification-server/pkg/sms"
 	"github.com/jinzhu/gorm"
+)
+
+// TestType is a test type in the database.
+type TestType int16
+
+const (
+	_ TestType = 1 << iota
+	TestTypeConfirmed
+	TestTypeLikely
+	TestTypeNegative
+)
+
+const (
+	maxCodeDuration     = time.Hour
+	maxLongCodeDuration = 24 * time.Hour
+
+	SMSRegion      = "[region]"
+	SMSCode        = "[code]"
+	SMSExpires     = "[expires]"
+	SMSLongCode    = "[longcode]"
+	SMSLongExpires = "[longexpires]"
 )
 
 // Realm represents a tenant in the system. Typically this corresponds to a
 // geography or a public health authority scope.
 // This is used to manage user logins.
 type Realm struct {
-	db *Database `gorm:"-"`
-
 	gorm.Model
+	Errorable
 
+	// Name is the name of the realm.
 	Name string `gorm:"type:varchar(200);unique_index"`
 
-	AuthorizedApps []*AuthorizedApp
+	// Code configuration
+	RegionCode       string          `gorm:"type:varchar(5); not null; default: ''"`
+	CodeLength       uint            `gorm:"type:smallint; not null; default: 8"`
+	CodeDuration     DurationSeconds `gorm:"type:bigint; not null; default: 900"` // default 15m (in seconds)
+	LongCodeLength   uint            `gorm:"type:smallint; not null; default: 16"`
+	LongCodeDuration DurationSeconds `gorm:"type:bigint; not null; default: 86400"` // default 24h
+	// SMS Content
+	SMSTextTemplate string `gorm:"type:varchar(400); not null; default: 'This is your Exposure Notifications Verification code: ens://v?r=[region]&c=[longcode] Expires in [longexpires] hours'"`
 
-	RealmUsers  []*User `gorm:"many2many:user_realms"`
-	RealmAdmins []*User `gorm:"many2many:admin_realms"`
+	// AllowedTestTypes is the type of tests that this realm permits. The default
+	// value is to allow all test types.
+	AllowedTestTypes TestType `gorm:"type:smallint; not null; default: 14"`
 
-	// Relations to items that blong to a realm.
-	Codes  []*VerificationCode
-	Tokens []*Token
+	// These are here for gorm to setup the association. You should NOT call them
+	// directly, ever. Use the ListUsers function instead. The have to be public
+	// for reflection.
+	RealmUsers  []*User `gorm:"many2many:user_realms; PRELOAD:false; SAVE_ASSOCIATIONS:false; ASSOCIATION_AUTOUPDATE:false, ASSOCIATION_SAVE_REFERENCE:false"`
+	RealmAdmins []*User `gorm:"many2many:admin_realms; PRELOAD:false; SAVE_ASSOCIATIONS:false; ASSOCIATION_AUTOUPDATE:false, ASSOCIATION_SAVE_REFERENCE:false"`
+
+	// Relations to items that belong to a realm.
+	Codes  []*VerificationCode `gorm:"PRELOAD:false; SAVE_ASSOCIATIONS:false; ASSOCIATION_AUTOUPDATE:false, ASSOCIATION_SAVE_REFERENCE:false"`
+	Tokens []*Token            `gorm:"PRELOAD:false; SAVE_ASSOCIATIONS:false; ASSOCIATION_AUTOUPDATE:false, ASSOCIATION_SAVE_REFERENCE:false"`
 }
 
-// SMSConfig returns the SMS config for the realm, if one exists.
-func (r *Realm) SMSConfig() (*SMSConfig, error) {
-	var c SMSConfig
-	c.db = r.db
+// NewRealmWithDefaults initializes a new Realm with the default settings populated,
+// and the provided name. It does NOT save the Realm to the database.
+func NewRealmWithDefaults(name string) *Realm {
+	return &Realm{
+		Name:             name,
+		CodeLength:       8,
+		CodeDuration:     DurationSeconds{Duration: 15 * time.Minute},
+		LongCodeLength:   16,
+		LongCodeDuration: DurationSeconds{Duration: 24 * time.Hour},
+		SMSTextTemplate:  "This is your Exposure Notifications Verification code: ens://v?r=[region]&c=[longcode] Expires in [longexpires] hours",
+		AllowedTestTypes: 14,
+	}
+}
 
-	if err := r.db.db.Model(r).Related(&c).Error; err != nil {
-		if IsNotFound(err) {
-			return nil, nil
-		}
-		return nil, err
+// BeforeSave runs validations. If there are errors, the save fails.
+func (r *Realm) BeforeSave(tx *gorm.DB) error {
+	r.Name = strings.TrimSpace(r.Name)
+	if r.Name == "" {
+		r.AddError("name", "cannot be blank")
 	}
 
-	return &c, nil
+	r.RegionCode = strings.ToUpper(strings.TrimSpace(r.RegionCode))
+
+	if r.CodeLength < 6 {
+		r.AddError("codeLength", "must be at least 6")
+	}
+	if r.CodeDuration.Duration > maxCodeDuration {
+		r.AddError("codeDuration", "must be no more than 1 hour")
+	}
+
+	if r.LongCodeLength < 12 {
+		r.AddError("longCodeLength", "must be at least 12")
+	}
+	if r.LongCodeDuration.Duration > maxLongCodeDuration {
+		r.AddError("longCodeDuration", "must be no more than 24 hours")
+	}
+
+	// Check that we have exactly one of [code] or [longcode] as template substitutions.
+	if c, lc := strings.Contains(r.SMSTextTemplate, "[code]"), strings.Contains(r.SMSTextTemplate, "[longcode]"); !(c || lc) || (c && lc) {
+		r.AddError("SMSTextTemplate", "must contain exactly one of [code] or [longcode]")
+	}
+
+	if len(r.Errors()) > 0 {
+		return fmt.Errorf("validation failed")
+	}
+	return nil
 }
 
-// HasSMSConfig returns true if the realm has SMS configuration, false
-// otherwise.
-func (r *Realm) HasSMSConfig() bool {
-	c, _ := r.SMSConfig()
-	return c != nil
+// GetCodeDurationMinutes is a helper for the HTML rendering to get a round
+// minutes value.
+func (r *Realm) GetCodeDurationMinutes() int {
+	return int(r.CodeDuration.Duration.Minutes())
+}
+
+// GetLongCodeDurationHours is a helper for the HTML rendering to get a round
+// hours value.
+func (r *Realm) GetLongCodeDurationHours() int {
+	return int(r.LongCodeDuration.Duration.Hours())
+}
+
+// BuildSMSText replaces certain strings with the right values.
+func (r *Realm) BuildSMSText(code, longCode string) string {
+	text := r.SMSTextTemplate
+
+	text = strings.ReplaceAll(text, SMSRegion, r.RegionCode)
+	text = strings.ReplaceAll(text, SMSCode, code)
+	text = strings.ReplaceAll(text, SMSExpires, fmt.Sprintf("%d", r.GetCodeDurationMinutes()))
+	text = strings.ReplaceAll(text, SMSLongCode, longCode)
+	text = strings.ReplaceAll(text, SMSLongExpires, fmt.Sprintf("%d", r.GetLongCodeDurationHours()))
+
+	return text
+}
+
+// SMSConfig returns the SMS configuration for this realm, if one exists.
+func (r *Realm) SMSConfig(db *Database) (*SMSConfig, error) {
+	var smsConfig SMSConfig
+	if err := db.db.
+		Model(r).
+		Related(&smsConfig, "SMSConfig").
+		Error; err != nil {
+		return nil, err
+	}
+	return &smsConfig, nil
+}
+
+// HasSMSConfig returns true if the realm has an SMS config, false otherwise.
+// This does not perform the KMS encryption/decryption, so it's more efficient
+// that loading the full SMS config.
+func (r *Realm) HasSMSConfig(db *Database) (bool, error) {
+	var smsConfig SMSConfig
+	if err := db.db.
+		Select("id").
+		Model(r).
+		Related(&smsConfig, "SMSConfig").
+		Error; err != nil {
+		if IsNotFound(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
 }
 
 // SMSProvider returns the SMS provider for the realm. If no sms configuration
 // exists, it returns nil. If any errors occur creating the provider, they are
 // returned.
-func (r *Realm) SMSProvider() (sms.Provider, error) {
-	c, err := r.SMSConfig()
+func (r *Realm) SMSProvider(db *Database) (sms.Provider, error) {
+	smsConfig, err := r.SMSConfig(db)
 	if err != nil {
+		if IsNotFound(err) {
+			return nil, nil
+		}
 		return nil, err
 	}
-	if c == nil {
-		return nil, nil
-	}
-
-	return c.SMSProvider()
+	return smsConfig.SMSProvider(db)
 }
 
-// AddAuthorizedApp adds to the in memory structure, but does not save.
-// Use SaveRealm to persist.
-func (r *Realm) AddAuthorizedApp(a *AuthorizedApp) {
-	r.AuthorizedApps = append(r.AuthorizedApps, a)
-}
-
-// AddUser add to the in memory structure, but does not save.
-// Use SaveRealm to persist.
-func (r *Realm) AddUser(u *User) {
-	for _, cUser := range r.RealmUsers {
-		if cUser.ID == u.ID {
-			return
+// ListAuthorizedApps gets all the authorized apps for the realm.
+func (r *Realm) ListAuthorizedApps(db *Database) ([]*AuthorizedApp, error) {
+	var authApps []*AuthorizedApp
+	if err := db.db.
+		Unscoped().
+		Model(r).
+		Order("authorized_apps.deleted_at DESC, LOWER(authorized_apps.name)").
+		Related(&authApps).
+		Error; err != nil {
+		if IsNotFound(err) {
+			return nil, nil
 		}
-	}
-	r.RealmUsers = append(r.RealmUsers, u)
-}
-
-// AddAdminUser adds to the in memory structure, but does not save.
-// Use SaveRealm to persist.
-func (r *Realm) AddAdminUser(u *User) {
-	// To be an admin of the realm you also have to be a user of the realm.
-	r.AddUser(u)
-	for _, cUser := range r.RealmAdmins {
-		if cUser.ID == u.ID {
-			return
-		}
-	}
-	r.RealmAdmins = append(r.RealmAdmins, u)
-}
-
-// LoadRealmUsers performs a lazy load over the users of the realm.
-// Really only needed for user admin scenarios.
-func (r *Realm) LoadRealmUsers(db *Database, includeDeleted bool) error {
-	scope := db.db
-	if includeDeleted {
-		scope = db.db.Unscoped()
-	}
-	if err := scope.Model(r).Preload("Realms").Preload("AdminRealms").Order("email").Related(&r.RealmUsers, "RealmUsers").Error; err != nil {
-		return fmt.Errorf("unable to load realm users: %w", err)
-	}
-	if err := scope.Model(r).Preload("Realms").Preload("AdminRealms").Order("email").Related(&r.RealmAdmins, "RealmAdmins").Error; err != nil {
-		return fmt.Errorf("unable to load realm admins: %w", err)
-	}
-
-	return nil
-}
-
-// GetAuthorizedApps does a lazy load on a realm's authorized apps if they are not already loaded.
-func (r *Realm) GetAuthorizedApps(db *Database, includeDeleted bool) ([]*AuthorizedApp, error) {
-	if len(r.AuthorizedApps) > 0 {
-		return r.AuthorizedApps, nil
-	}
-	scope := db.db
-	if includeDeleted {
-		scope = db.db.Unscoped()
-	}
-	if err := scope.Model(r).Related(&r.AuthorizedApps).Error; err != nil {
 		return nil, err
 	}
-	return r.AuthorizedApps, nil
+	return authApps, nil
 }
 
-func (r *Realm) DeleteUserFromRealm(db *Database, u *User) error {
-	return db.db.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Model(r).Association("RealmUsers").Delete(u).Error; err != nil {
-			return fmt.Errorf("unable to remove user from realm: %w", err)
-		}
-		if err := tx.Model(r).Association("RealmAdmins").Delete(u).Error; err != nil {
-			return fmt.Errorf("unable to remove user from realm admins: %w", err)
-		}
+// FindAuthorizedApp finds the authorized app by the given id associated to the
+// realm.
+func (r *Realm) FindAuthorizedApp(db *Database, id interface{}) (*AuthorizedApp, error) {
+	var app AuthorizedApp
+	if err := db.db.
+		Unscoped().
+		Model(AuthorizedApp{}).
+		Where("id = ? AND realm_id = ?", id, r.ID).
+		First(&app).
+		Error; err != nil {
+		return nil, err
+	}
+	return &app, nil
+}
 
-		// If the user no has no associations, the user should be deleted.
-		var user User
-		if err := tx.Preload("Realms").Preload("AdminRealms").Where("id = ?", u.ID).First(&user).Error; err != nil {
-			return fmt.Errorf("failed to check other user associations: %w", err)
-		}
-		if len(user.AdminRealms) == 0 && len(user.Realms) == 0 {
-			if err := tx.Delete(user).Error; err != nil {
-				return fmt.Errorf("unable to delete user: %w", err)
-			}
-		}
-		return nil
-	})
+// ListUsers returns the list of users on this realm.
+func (r *Realm) ListUsers(db *Database) ([]*User, error) {
+	var users []*User
+	if err := db.db.
+		Model(r).
+		Related(&users, "RealmUsers").
+		Order("email").
+		Error; err != nil {
+		return nil, err
+	}
+	return users, nil
+}
+
+// FindUser finds the given user in the realm by ID.
+func (r *Realm) FindUser(db *Database, id interface{}) (*User, error) {
+	var user User
+	if err := db.db.
+		Table("users").
+		Joins("INNER JOIN user_realms ON user_id = ? AND realm_id = ?", id, r.ID).
+		Find(&user, "users.id = ?", id).
+		Error; err != nil {
+		return nil, err
+	}
+	return &user, nil
+}
+
+// ValidTestType returns true if the given test type string is valid for this
+// realm, false otherwise.
+func (r *Realm) ValidTestType(typ string) bool {
+	switch strings.TrimSpace(strings.ToLower(typ)) {
+	case "confirmed":
+		return r.AllowedTestTypes&TestTypeConfirmed != 0
+	case "likely":
+		return r.AllowedTestTypes&TestTypeLikely != 0
+	case "negative":
+		return r.AllowedTestTypes&TestTypeNegative != 0
+	default:
+		return false
+	}
 }
 
 func (db *Database) CreateRealm(name string) (*Realm, error) {
-	var realm Realm
-	realm.db = db
-	realm.Name = name
+	realm := NewRealmWithDefaults(name)
 
-	if err := db.db.Create(&realm).Error; err != nil {
+	if err := db.db.Create(realm).Error; err != nil {
 		return nil, fmt.Errorf("unable to save realm: %w", err)
 	}
-	return &realm, nil
+	return realm, nil
 }
 
 func (db *Database) GetRealmByName(name string) (*Realm, error) {
 	var realm Realm
-	realm.db = db
 
 	if err := db.db.Where("name = ?", name).First(&realm).Error; err != nil {
 		return nil, err
@@ -186,7 +288,6 @@ func (db *Database) GetRealmByName(name string) (*Realm, error) {
 
 func (db *Database) GetRealm(realmID uint) (*Realm, error) {
 	var realm Realm
-	realm.db = db
 
 	if err := db.db.Where("id = ?", realmID).First(&realm).Error; err != nil {
 		return nil, err
@@ -203,8 +304,6 @@ func (db *Database) GetRealms() ([]*Realm, error) {
 }
 
 func (db *Database) SaveRealm(r *Realm) error {
-	r.db = db
-
 	if r.Model.ID == 0 {
 		return db.db.Create(r).Error
 	}

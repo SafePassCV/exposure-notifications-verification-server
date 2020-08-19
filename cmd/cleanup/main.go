@@ -19,16 +19,19 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
+	"strconv"
 	"time"
 
 	"github.com/google/exposure-notifications-verification-server/pkg/config"
+	"github.com/google/exposure-notifications-verification-server/pkg/controller"
 	"github.com/google/exposure-notifications-verification-server/pkg/controller/cleanup"
-	"github.com/google/exposure-notifications-verification-server/pkg/logging"
-	"github.com/google/exposure-notifications-verification-server/pkg/observability"
 	"github.com/google/exposure-notifications-verification-server/pkg/render"
 	"github.com/sethvargo/go-signalcontext"
 
 	"github.com/google/exposure-notifications-server/pkg/cache"
+	"github.com/google/exposure-notifications-server/pkg/logging"
+	"github.com/google/exposure-notifications-server/pkg/observability"
 	"github.com/google/exposure-notifications-server/pkg/server"
 
 	"github.com/gorilla/mux"
@@ -37,10 +40,13 @@ import (
 func main() {
 	ctx, done := signalcontext.OnInterrupt()
 
+	debug, _ := strconv.ParseBool(os.Getenv("LOG_DEBUG"))
+	logger := logging.NewLogger(debug)
+	ctx = logging.WithLogger(ctx, logger)
+
 	err := realMain(ctx)
 	done()
 
-	logger := logging.FromContext(ctx)
 	if err != nil {
 		logger.Fatal(err)
 	}
@@ -62,14 +68,18 @@ func realMain(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("unable to create ObservabilityExporter provider: %w", err)
 	}
-	if err := oe.InitExportOnce(); err != nil {
+	if err := oe.StartExporter(); err != nil {
 		return fmt.Errorf("error initializing observability exporter: %w", err)
 	}
+	defer oe.Close()
 	logger.Infow("observability exporter", "config", oeConfig)
 
 	// Setup database
-	db, err := config.Database.Open(ctx)
+	db, err := config.Database.Load(ctx)
 	if err != nil {
+		return fmt.Errorf("failed to load database config: %w", err)
+	}
+	if err := db.Open(ctx); err != nil {
 		return fmt.Errorf("failed to connect to database: %w", err)
 	}
 	defer db.Close()
@@ -82,6 +92,7 @@ func realMain(ctx context.Context) error {
 
 	// Create the router
 	r := mux.NewRouter()
+	r.Handle("/healthz", controller.HandleHealthz(ctx, h, &config.Database)).Methods("GET")
 
 	// Cleanup handler doesn't require authentication - does use locking to ensure
 	// database isn't tipped over by cleanup.

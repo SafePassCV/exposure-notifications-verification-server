@@ -15,66 +15,114 @@
 package database
 
 import (
+	"encoding/base64"
+	"fmt"
+	"strings"
 	"testing"
-
-	"github.com/google/go-cmp/cmp"
-	"github.com/google/go-cmp/cmp/cmpopts"
 )
 
-func TestCreateFindAPIKey(t *testing.T) {
+func TestDatabase_CreateFindAPIKey(t *testing.T) {
 	t.Parallel()
+
 	db := NewTestDatabase(t)
 
 	realm, err := db.CreateRealm("foo")
 	if err != nil {
-		t.Fatalf("error creating realm: %v", err)
+		t.Fatal(err)
 	}
 
-	authApp, err := db.CreateAuthorizedApp(realm.ID, "University System Health Org", APIUserTypeAdmin)
-	if err != nil {
-		t.Fatalf("error creating authorized app: %v", err)
+	authApp := &AuthorizedApp{
+		Name:       "University System Health Org",
+		APIKeyType: APIUserTypeAdmin,
 	}
 
-	got, err := db.FindAuthorizedAppByAPIKey(authApp.APIKey)
+	apiKey, err := realm.CreateAuthorizedApp(db, authApp)
 	if err != nil {
-		t.Fatalf("error reading authorized app by api key: %v", err)
+		t.Fatal(err)
 	}
-	// Ignore the preloaded realm on the got AuthorizedApp
-	if diff := cmp.Diff(authApp, got, approxTime, cmpopts.IgnoreFields(AuthorizedApp{}, "Realm")); diff != "" {
-		t.Fatalf("mismatch (-want, +got):\n%s", diff)
+
+	got, err := db.FindAuthorizedAppByAPIKey(apiKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil {
+		t.Fatalf("expected result")
+	}
+
+	if _, err := got.Realm(db); err != nil {
+		t.Fatalf("expected realm: %v", err)
+	}
+
+	if strings.Contains(apiKey, authApp.APIKey) {
+		t.Errorf("database API key should be HMACed!")
+	}
+
+	if got, want := got.RealmID, authApp.RealmID; got != want {
+		t.Errorf("expected %#v to be %#v", got, want)
+	}
+	if got, want := got.Name, authApp.Name; got != want {
+		t.Errorf("expected %#v to be %#v", got, want)
+	}
+	if got, want := got.APIKey, authApp.APIKey; got != want {
+		t.Errorf("expected %#v to be %#v", got, want)
+	}
+	if got, want := got.APIKeyPreview, authApp.APIKeyPreview; got != want {
+		t.Errorf("expected %#v to be %#v", got, want)
+	}
+	if got, want := got.APIKeyType, authApp.APIKeyType; got != want {
+		t.Errorf("expected %#v to be %#v", got, want)
 	}
 }
 
-func TestListAPIKeys(t *testing.T) {
+func TestDatabase_GenerateAPIKey(t *testing.T) {
 	t.Parallel()
-	db := NewTestDatabase(t)
 
-	var authApp1, authApp2 *AuthorizedApp
-	var err error
+	db := NewTestDatabase(t)
 
 	realm, err := db.CreateRealm("bar")
 	if err != nil {
-		t.Fatalf("error creating realm: %v", err)
+		t.Fatal(err)
 	}
 
-	authApp1, err = db.CreateAuthorizedApp(realm.ID, "App 1", APIUserTypeAdmin)
+	key, err := db.GenerateAPIKey(realm.ID)
 	if err != nil {
-		t.Fatalf("error creating app: %v", err)
+		t.Fatal(err)
 	}
-	authApp2, err = db.CreateAuthorizedApp(realm.ID, "App 2", APIUserTypeDevice)
+
+	parts := strings.SplitN(key, ".", 3)
+	if got, want := len(parts), 3; got != want {
+		t.Fatalf("expected %v to be %v", got, want)
+	}
+
+	if got, want := parts[1], fmt.Sprintf("%d", realm.ID); got != want {
+		t.Fatalf("expected %v to be %v", got, want)
+	}
+}
+
+func TestDatabase_GenerateVerifyAPIKeySignature(t *testing.T) {
+	t.Parallel()
+
+	db := NewTestDatabase(t)
+
+	apiKey, realmID := "abcd1234", uint(15)
+
+	key := fmt.Sprintf("%s.%d", apiKey, realmID)
+	sig, err := db.GenerateAPIKeySignature(key)
 	if err != nil {
-		t.Fatalf("error creating app: %v", err)
+		t.Fatal(err)
 	}
+	key = fmt.Sprintf("%s.%s", key, base64.RawURLEncoding.EncodeToString(sig))
 
-	want := []*AuthorizedApp{authApp1, authApp2}
-	got, err := db.ListAuthorizedApps(false)
-
+	gotAPIKey, gotRealmID, err := db.VerifyAPIKeySignature(key)
 	if err != nil {
-		t.Fatalf("error listing apps: %v", err)
+		t.Fatal(err)
 	}
 
-	// Ignore the preloaded realm on the got AuthorizedApp
-	if diff := cmp.Diff(want, got, approxTime, cmpopts.IgnoreFields(AuthorizedApp{}, "Realm")); diff != "" {
-		t.Fatalf("mismatch (-want, +got):\n%s", diff)
+	if got, want := gotAPIKey, apiKey; got != want {
+		t.Errorf("expected %v to be %v", got, want)
+	}
+
+	if got, want := gotRealmID, realmID; got != want {
+		t.Errorf("expected %v to be %v", got, want)
 	}
 }

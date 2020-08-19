@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-FROM golang:1.14 AS builder
+FROM golang:1.15 AS builder
 
 ARG SERVICE
 
@@ -25,8 +25,11 @@ ENV GOOS=linux
 ENV GOARCH=amd64
 
 WORKDIR /src
-COPY . .
+COPY go.mod .
+COPY go.sum .
+RUN go mod download
 
+COPY . .
 RUN go build \
   -trimpath \
   -ldflags "-s -w -extldflags '-static'" \

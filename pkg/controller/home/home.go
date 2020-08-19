@@ -26,8 +26,9 @@ import (
 	"github.com/google/exposure-notifications-verification-server/pkg/config"
 	"github.com/google/exposure-notifications-verification-server/pkg/controller"
 	"github.com/google/exposure-notifications-verification-server/pkg/database"
-	"github.com/google/exposure-notifications-verification-server/pkg/logging"
 	"github.com/google/exposure-notifications-verification-server/pkg/render"
+
+	"github.com/google/exposure-notifications-server/pkg/logging"
 
 	"go.uber.org/zap"
 )
@@ -70,13 +71,20 @@ func (c *Controller) HandleHome() http.Handler {
 			return
 		}
 
+		hasSMSConfig, err := realm.HasSMSConfig(c.db)
+		if err != nil {
+			controller.InternalError(w, r, c.h, err)
+			return
+		}
+
 		m := controller.TemplateMapFromContext(ctx)
 		// Set test date params
 		now := time.Now().UTC()
 		m["maxDate"] = now.Format("2006-01-02")
 		m["minDate"] = now.Add(c.pastDaysDuration).Format("2006-01-02")
 		m["maxSymptomDays"] = c.displayAllowedDays
-		m["duration"] = c.config.CodeDuration.String()
+		m["duration"] = realm.CodeDuration.Duration.String()
+		m["hasSMSConfig"] = hasSMSConfig
 		c.h.RenderHTML(w, "home", m)
 	})
 }

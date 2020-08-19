@@ -18,13 +18,13 @@ package ratelimit
 import (
 	"context"
 	"fmt"
-	"net"
 	"time"
 
+	"github.com/gomodule/redigo/redis"
 	"github.com/sethvargo/go-limiter"
 	"github.com/sethvargo/go-limiter/memorystore"
 	"github.com/sethvargo/go-limiter/noopstore"
-	"github.com/sethvargo/go-limiter/redisstore"
+	"github.com/sethvargo/go-redisstore"
 )
 
 // RateLimitType represents a type of rate limiter.
@@ -48,13 +48,12 @@ type Config struct {
 	RedisPort     string `env:"REDIS_PORT,default=6379"`
 	RedisUsername string `env:"REDIS_USERNAME"`
 	RedisPassword string `env:"REDIS_PASSWORD"`
-	RedisMinPool  uint64 `env:"REDIS_MIN_POOL,default=16"`
 	RedisMaxPool  uint64 `env:"REDIS_MAX_POOL,default=64"`
 }
 
 // RateLimiterFor returns the rate limiter for the given type, or an error
 // if one does not exist.
-func RateLimiterFor(_ context.Context, c *Config) (limiter.Store, error) {
+func RateLimiterFor(ctx context.Context, c *Config) (limiter.Store, error) {
 	switch c.Type {
 	case RateLimiterTypeNoop:
 		return noopstore.New()
@@ -65,16 +64,24 @@ func RateLimiterFor(_ context.Context, c *Config) (limiter.Store, error) {
 		})
 	case RateLimiterTypeRedis:
 		addr := c.RedisHost + ":" + c.RedisPort
-		return redisstore.New(&redisstore.Config{
-			Tokens:          c.Tokens,
-			Interval:        c.Interval,
-			InitialPoolSize: c.RedisMinPool,
-			MaxPoolSize:     c.RedisMaxPool,
-			DialFunc: func() (net.Conn, error) {
-				return net.Dial("tcp", addr)
+
+		config := &redisstore.Config{
+			Tokens:   c.Tokens,
+			Interval: c.Interval,
+		}
+
+		return redisstore.NewWithPool(config, &redis.Pool{
+			DialContext: func(ctx context.Context) (redis.Conn, error) {
+				return redis.DialContext(ctx, "tcp", addr,
+					redis.DialUsername(c.RedisUsername),
+					redis.DialPassword(c.RedisPassword),
+				)
 			},
-			AuthUsername: c.RedisUsername,
-			AuthPassword: c.RedisPassword,
+			TestOnBorrow: func(conn redis.Conn, _ time.Time) error {
+				_, err := conn.Do("PING")
+				return err
+			},
+			MaxActive: int(c.RedisMaxPool),
 		})
 	}
 

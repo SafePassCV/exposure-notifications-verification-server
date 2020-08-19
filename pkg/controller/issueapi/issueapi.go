@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package issueapi implements the API handler for taking a code requst, assigning
+// Package issueapi implements the API handler for taking a code request, assigning
 // an OTP, saving it to the database and returning the result.
 // This is invoked over AJAX from the Web frontend.
 package issueapi
@@ -23,8 +23,9 @@ import (
 	"github.com/google/exposure-notifications-verification-server/pkg/api"
 	"github.com/google/exposure-notifications-verification-server/pkg/config"
 	"github.com/google/exposure-notifications-verification-server/pkg/database"
-	"github.com/google/exposure-notifications-verification-server/pkg/logging"
 	"github.com/google/exposure-notifications-verification-server/pkg/render"
+
+	"github.com/google/exposure-notifications-server/pkg/logging"
 
 	"go.uber.org/zap"
 )

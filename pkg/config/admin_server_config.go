@@ -19,7 +19,10 @@ import (
 	"time"
 
 	"github.com/google/exposure-notifications-verification-server/pkg/database"
-	"github.com/google/exposure-notifications-verification-server/pkg/observability"
+	"github.com/google/exposure-notifications-verification-server/pkg/ratelimit"
+
+	"github.com/google/exposure-notifications-server/pkg/observability"
+
 	"github.com/sethvargo/go-envconfig"
 )
 
@@ -34,13 +37,13 @@ type AdminAPIServerConfig struct {
 	// production environments.
 	DevMode bool `env:"DEV_MODE"`
 
+	// Rate limiting configuration
+	RateLimit ratelimit.Config
+
 	Port                string        `env:"PORT,default=8080"`
-	RateLimit           uint64        `env:"RATE_LIMIT,default=60"`
 	APIKeyCacheDuration time.Duration `env:"API_KEY_CACHE_DURATION,default=5m"`
 
-	CodeDuration        time.Duration `env:"CODE_DURATION,default=1h"`
-	CodeDigits          uint          `env:"CODE_DIGITS,default=8"`
-	CollisionRetryCount uint          `env:"COLISSION_RETRY_COUNT,default=6"`
+	CollisionRetryCount uint          `env:"COLLISION_RETRY_COUNT,default=6"`
 	AllowedSymptomAge   time.Duration `env:"ALLOWED_PAST_SYMPTOM_DAYS,default=336h"` // 336h is 14 days.
 }
 
@@ -61,7 +64,6 @@ func (c *AdminAPIServerConfig) Validate() error {
 	}{
 		{c.APIKeyCacheDuration, "API_KEY_CACHE_DURATION"},
 		{c.AllowedSymptomAge, "ALLOWED_PAST_SYMPTOM_DAYS"},
-		{c.CodeDuration, "CODE_DURATION"},
 	}
 
 	for _, f := range fields {
@@ -73,20 +75,12 @@ func (c *AdminAPIServerConfig) Validate() error {
 	return nil
 }
 
-func (c *AdminAPIServerConfig) GetColissionRetryCount() uint {
+func (c *AdminAPIServerConfig) GetCollisionRetryCount() uint {
 	return c.CollisionRetryCount
 }
 
 func (c *AdminAPIServerConfig) GetAllowedSymptomAge() time.Duration {
 	return c.AllowedSymptomAge
-}
-
-func (c *AdminAPIServerConfig) GetVerificationCodeDuration() time.Duration {
-	return c.CodeDuration
-}
-
-func (c *AdminAPIServerConfig) GetVerficationCodeDigits() uint {
-	return c.CodeDigits
 }
 
 func (c *AdminAPIServerConfig) ObservabilityExporterConfig() *observability.Config {

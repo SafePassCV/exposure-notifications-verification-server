@@ -22,8 +22,9 @@ import (
 	"strings"
 
 	"github.com/google/exposure-notifications-verification-server/pkg/api"
-	"github.com/google/exposure-notifications-verification-server/pkg/logging"
 	"github.com/google/exposure-notifications-verification-server/pkg/render"
+
+	"github.com/google/exposure-notifications-server/pkg/logging"
 )
 
 var (
@@ -37,6 +38,11 @@ var (
 
 func init() {
 	gob.Register(*new(sessionKey))
+}
+
+// Back goes back to the referrer.
+func Back(w http.ResponseWriter, r *http.Request, h *render.Renderer) {
+	http.Redirect(w, r, r.Header.Get("Referer"), http.StatusSeeOther)
 }
 
 // InternalError handles an internal error, returning the right response to the
@@ -54,7 +60,7 @@ func InternalError(w http.ResponseWriter, r *http.Request, h *render.Renderer, e
 	case prefixInList(accept, ContentTypeJSON):
 		h.JSON500(w, err)
 	default:
-		http.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 	}
 }
 
@@ -71,7 +77,7 @@ func Unauthorized(w http.ResponseWriter, r *http.Request, h *render.Renderer) {
 	case prefixInList(accept, ContentTypeJSON):
 		h.RenderJSON(w, http.StatusUnauthorized, apiErrorUnauthorized)
 	default:
-		http.Error(w, http.StatusText(http.StatusBadRequest), http.StatusBadRequest)
+		http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
 	}
 }
 

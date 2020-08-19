@@ -19,10 +19,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/exposure-notifications-server/pkg/base64util"
 	"github.com/google/exposure-notifications-verification-server/pkg/database"
-	"github.com/google/exposure-notifications-verification-server/pkg/observability"
 	"github.com/google/exposure-notifications-verification-server/pkg/ratelimit"
+
+	"github.com/google/exposure-notifications-server/pkg/observability"
 
 	firebase "firebase.google.com/go"
 	"github.com/sethvargo/go-envconfig"
@@ -52,13 +52,11 @@ type ServerConfig struct {
 
 	// CSRFAuthKey is the authentication key. It must be 32-bytes and can be
 	// generated with tools/gen-secret. The value's should be base64 encoded.
-	CSRFAuthKey Base64Bytes `env:"CSRF_AUTH_KEY,required"`
+	CSRFAuthKey envconfig.Base64Bytes `env:"CSRF_AUTH_KEY,required"`
 
 	// Application Config
 	ServerName          string        `env:"SERVER_NAME,default=Diagnosis Verification Server"`
-	CodeDuration        time.Duration `env:"CODE_DURATION,default=1h"`
-	CodeDigits          uint          `env:"CODE_DIGITS,default=8"`
-	CollisionRetryCount uint          `env:"COLISSION_RETRY_COUNT,default=6"`
+	CollisionRetryCount uint          `env:"COLLISION_RETRY_COUNT,default=6"`
 	AllowedSymptomAge   time.Duration `env:"ALLOWED_PAST_SYMPTOM_DAYS,default=336h"` // 336h is 14 days.
 
 	AssetsPath string `env:"ASSETS_PATH,default=./cmd/server/assets"`
@@ -87,9 +85,8 @@ func (c *ServerConfig) Validate() error {
 		Var  time.Duration
 		Name string
 	}{
-		{c.SessionDuration, "SESSION_DUATION"},
+		{c.SessionDuration, "SESSION_DURATION"},
 		{c.RevokeCheckPeriod, "REVOKE_CHECK_DURATION"},
-		{c.CodeDuration, "CODE_DURATION"},
 		{c.AllowedSymptomAge, "ALLOWED_PAST_SYMPTOM_DAYS"},
 	}
 
@@ -102,20 +99,12 @@ func (c *ServerConfig) Validate() error {
 	return nil
 }
 
-func (c *ServerConfig) GetColissionRetryCount() uint {
+func (c *ServerConfig) GetCollisionRetryCount() uint {
 	return c.CollisionRetryCount
 }
 
 func (c *ServerConfig) GetAllowedSymptomAge() time.Duration {
 	return c.AllowedSymptomAge
-}
-
-func (c *ServerConfig) GetVerificationCodeDuration() time.Duration {
-	return c.CodeDuration
-}
-
-func (c *ServerConfig) GetVerficationCodeDigits() uint {
-	return c.CodeDigits
 }
 
 func (c *ServerConfig) ObservabilityExporterConfig() *observability.Config {
@@ -132,6 +121,9 @@ type FirebaseConfig struct {
 	MessageSenderID string `env:"FIREBASE_MESSAGE_SENDER_ID,required"`
 	AppID           string `env:"FIREBASE_APP_ID,required"`
 	MeasurementID   string `env:"FIREBASE_MEASUREMENT_ID,required"`
+
+	TermsOfServiceURL string `env:"FIREBASE_TERMS_OF_SERVICE_URL,required"`
+	PrivacyPolicyURL  string `env:"FIREBASE_PRIVACY_POLICY_URL,required"`
 }
 
 // FirebaseConfig returns the firebase SDK config based on the local env config.
@@ -145,7 +137,7 @@ func (c *ServerConfig) FirebaseConfig() *firebase.Config {
 
 // Base64ByteSlice is a slice of base64-encoded strings that we want to convert
 // to bytes.
-type Base64ByteSlice []Base64Bytes
+type Base64ByteSlice []envconfig.Base64Bytes
 
 // AsBytes returns the value as a slice of bytes instead of its main type.
 func (c Base64ByteSlice) AsBytes() [][]byte {
@@ -154,15 +146,4 @@ func (c Base64ByteSlice) AsBytes() [][]byte {
 		s[i] = []byte(v)
 	}
 	return s
-}
-
-// Base64Bytes is a type that parses a base64-encoded string into a []byte.
-type Base64Bytes []byte
-
-// EnvDecode implements envconfig.Decoder to decode a base64 value into a
-// []byte. If an error occurs, it is returned.
-func (b *Base64Bytes) EnvDecode(val string) error {
-	var err error
-	*b, err = base64util.DecodeString(val)
-	return err
 }

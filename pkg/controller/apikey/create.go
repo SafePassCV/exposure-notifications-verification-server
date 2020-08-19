@@ -15,6 +15,8 @@
 package apikey
 
 import (
+	"context"
+	"fmt"
 	"net/http"
 
 	"github.com/google/exposure-notifications-verification-server/pkg/controller"
@@ -23,8 +25,8 @@ import (
 
 func (c *Controller) HandleCreate() http.Handler {
 	type FormData struct {
-		Name string               `form:"name,required"`
-		Type database.APIUserType `form:"type,required"`
+		Name string               `form:"name"`
+		Type database.APIUserType `form:"type"`
 	}
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -43,21 +45,53 @@ func (c *Controller) HandleCreate() http.Handler {
 			return
 		}
 
+		// Requested form, stop processing.
+		if r.Method == http.MethodGet {
+			var authApp database.AuthorizedApp
+			authApp.APIKeyType = -1
+			c.renderNew(ctx, w, &authApp)
+			return
+		}
+
 		var form FormData
 		if err := controller.BindForm(w, r, &form); err != nil {
+			authApp := &database.AuthorizedApp{
+				Name:       form.Name,
+				APIKeyType: form.Type,
+			}
+
 			flash.Error("Failed to process form: %v", err)
-			http.Redirect(w, r, "/apikeys", http.StatusSeeOther)
+			c.renderNew(ctx, w, authApp)
 			return
 		}
 
-		if _, err := c.db.CreateAuthorizedApp(realm.ID, form.Name, form.Type); err != nil {
-			c.logger.Errorw("failed to create authorized app", "error", err)
-			flash.Error("Failed to create API key: %v", err)
-			http.Redirect(w, r, "/apikeys", http.StatusSeeOther)
+		// Build the authorized app struct
+		authApp := &database.AuthorizedApp{
+			Name:       form.Name,
+			APIKeyType: form.Type,
+		}
+
+		apiKey, err := realm.CreateAuthorizedApp(c.db, authApp)
+		if err != nil {
+			flash.Error("Failed to create API Key: %v", err)
+			c.renderNew(ctx, w, authApp)
 			return
 		}
+
+		// Store the API key on the session temporarily so it can be displayed on
+		// the next page.
+		session.Values["apiKey"] = apiKey
 
 		flash.Alert("Successfully created API Key for %v", form.Name)
-		http.Redirect(w, r, "/apikeys", http.StatusSeeOther)
+		http.Redirect(w, r, fmt.Sprintf("/apikeys/%d", authApp.ID), http.StatusSeeOther)
 	})
+}
+
+// renderNew renders the edit page.
+func (c *Controller) renderNew(ctx context.Context, w http.ResponseWriter, authApp *database.AuthorizedApp) {
+	m := controller.TemplateMapFromContext(ctx)
+	m["authApp"] = authApp
+	m["typeAdmin"] = database.APIUserTypeAdmin
+	m["typeDevice"] = database.APIUserTypeDevice
+	c.h.RenderHTML(w, "apikeys/new", m)
 }

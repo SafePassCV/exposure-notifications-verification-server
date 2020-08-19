@@ -123,10 +123,107 @@ resource "google_secret_manager_secret_version" "db-secret-version" {
   secret_data = each.value
 }
 
-# Grant Cloud Build the ability to access the database password (required to run
+# Create secret for the database HMAC for API keys
+resource "random_id" "db-apikey-db-hmac" {
+  byte_length = 128
+}
+
+resource "google_secret_manager_secret" "db-apikey-db-hmac" {
+  secret_id = "db-apikey-db-hmac"
+
+  replication {
+    automatic = true
+  }
+
+  depends_on = [
+    google_project_service.services["secretmanager.googleapis.com"],
+  ]
+}
+
+resource "google_secret_manager_secret_version" "db-apikey-db-hmac" {
+  secret      = google_secret_manager_secret.db-apikey-db-hmac.id
+  secret_data = random_id.db-apikey-db-hmac.b64_std
+}
+
+# Create secret for signature HMAC for api keys
+resource "random_id" "db-apikey-sig-hmac" {
+  byte_length = 128
+}
+
+resource "google_secret_manager_secret" "db-apikey-sig-hmac" {
+  secret_id = "db-apikey-sig-hmac"
+
+  replication {
+    automatic = true
+  }
+
+  depends_on = [
+    google_project_service.services["secretmanager.googleapis.com"],
+  ]
+}
+
+resource "google_secret_manager_secret_version" "db-apikey-sig-hmac" {
+  secret      = google_secret_manager_secret.db-apikey-sig-hmac.id
+  secret_data = random_id.db-apikey-sig-hmac.b64_std
+}
+
+# Create secret for the database HMAC for verification codes
+resource "random_id" "db-verification-code-hmac" {
+  byte_length = 128
+}
+
+resource "google_secret_manager_secret" "db-verification-code-hmac" {
+  secret_id = "db-verification-code-hmac"
+
+  replication {
+    automatic = true
+  }
+
+  depends_on = [
+    google_project_service.services["secretmanager.googleapis.com"],
+  ]
+}
+
+resource "google_secret_manager_secret_version" "db-verification-code-hmac" {
+  secret      = google_secret_manager_secret.db-verification-code-hmac.id
+  secret_data = random_id.db-verification-code-hmac.b64_std
+}
+
+
+# Grant Cloud Build the ability to access the database secrets (required to run
 # migrations).
 resource "google_secret_manager_secret_iam_member" "cloudbuild-db-pwd" {
   secret_id = google_secret_manager_secret.db-secret["password"].id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${data.google_project.project.number}@cloudbuild.gserviceaccount.com"
+
+  depends_on = [
+    google_project_service.services["cloudbuild.googleapis.com"],
+  ]
+}
+
+resource "google_secret_manager_secret_iam_member" "cloudbuild-db-apikey-db-hmac" {
+  secret_id = google_secret_manager_secret.db-apikey-db-hmac.id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${data.google_project.project.number}@cloudbuild.gserviceaccount.com"
+
+  depends_on = [
+    google_project_service.services["cloudbuild.googleapis.com"],
+  ]
+}
+
+resource "google_secret_manager_secret_iam_member" "cloudbuild-db-apikey-sig-hmac" {
+  secret_id = google_secret_manager_secret.db-apikey-sig-hmac.id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${data.google_project.project.number}@cloudbuild.gserviceaccount.com"
+
+  depends_on = [
+    google_project_service.services["cloudbuild.googleapis.com"],
+  ]
+}
+
+resource "google_secret_manager_secret_iam_member" "cloudbuild-db-verification-code-hmac" {
+  secret_id = google_secret_manager_secret.db-verification-code-hmac.id
   role      = "roles/secretmanager.secretAccessor"
   member    = "serviceAccount:${data.google_project.project.number}@cloudbuild.gserviceaccount.com"
 
@@ -164,17 +261,24 @@ resource "null_resource" "migrate" {
       PROJECT_ID = var.project
       REGION     = var.region
 
-      DB_CONN           = google_sql_database_instance.db-inst.connection_name
-      DB_ENCRYPTION_KEY = google_kms_crypto_key.database-encrypter.self_link
-      DB_NAME           = google_sql_database.db.name
-      DB_PASS_SECRET    = google_secret_manager_secret_version.db-secret-version["password"].name
-      DB_USER           = google_sql_user.user.name
+      DB_APIKEY_DATABASE_KEY            = "secret://${google_secret_manager_secret_version.db-apikey-db-hmac.id}"
+      DB_APIKEY_SIGNATURE_KEY           = "secret://${google_secret_manager_secret_version.db-apikey-sig-hmac.id}"
+      DB_CONN                           = google_sql_database_instance.db-inst.connection_name
+      DB_DEBUG                          = true
+      DB_ENCRYPTION_KEY                 = google_kms_crypto_key.database-encrypter.self_link
+      DB_NAME                           = google_sql_database.db.name
+      DB_PASSWORD                       = "secret://${google_secret_manager_secret_version.db-secret-version["password"].id}"
+      DB_USER                           = google_sql_user.user.name
+      DB_VERIFICATION_CODE_DATABASE_KEY = "secret://${google_secret_manager_secret_version.db-verification-code-hmac.id}"
+      LOG_DEBUG                         = true
     }
 
     command = "${path.module}/../scripts/migrate"
   }
 
   depends_on = [
+    google_sql_database.db,
+    google_secret_manager_secret_version.db-apikey-sig-hmac,
     google_project_service.services["cloudbuild.googleapis.com"],
     google_secret_manager_secret_iam_member.cloudbuild-db-pwd,
     google_project_iam_member.cloudbuild-sql,
@@ -197,7 +301,7 @@ output "db_user" {
   value = google_sql_user.user.name
 }
 
-output "db_pass_secret" {
+output "db_password" {
   value = google_secret_manager_secret_version.db-secret-version["password"].name
 }
 
@@ -207,4 +311,20 @@ output "proxy_command" {
 
 output "proxy_env" {
   value = "DB_SSLMODE=disable DB_HOST=127.0.0.1 DB_NAME=${google_sql_database.db.name} DB_PORT=5432 DB_USER=${google_sql_user.user.name} DB_PASSWORD=$(gcloud secrets versions access ${google_secret_manager_secret_version.db-secret-version["password"].name})"
+}
+
+output "db_encryption_key_secret" {
+  value = google_kms_crypto_key.database-encrypter.self_link
+}
+
+output "db_apikey_database_key_secret" {
+  value = "secret://${google_secret_manager_secret_version.db-apikey-db-hmac.id}"
+}
+
+output "db_apikey_signature_key_secret" {
+  value = "secret://${google_secret_manager_secret_version.db-apikey-sig-hmac.id}"
+}
+
+output "db_verification_code_key_secret" {
+  value = "secret://${google_secret_manager_secret_version.db-verification-code-hmac.id}"
 }

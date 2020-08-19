@@ -18,67 +18,97 @@ package main
 import (
 	"context"
 	"flag"
-	"log"
+	"fmt"
+	"os"
+	"strconv"
 
+	"github.com/google/exposure-notifications-verification-server/pkg/config"
 	"github.com/google/exposure-notifications-verification-server/pkg/database"
 
-	"github.com/jinzhu/gorm"
+	"github.com/google/exposure-notifications-server/pkg/logging"
+
 	"github.com/sethvargo/go-envconfig"
+	"github.com/sethvargo/go-signalcontext"
+)
+
+var (
+	emailFlag      = flag.String("email", "", "email for the user to add")
+	nameFlag       = flag.String("name", "", "name of the user to add")
+	adminFlag      = flag.Bool("admin", false, "true if user is admin user")
+	realmID        = flag.Uint("realm", 0, "realm to add the user to")
+	realmAdminFlag = flag.Bool("admin-realm", false, "realm to add the user to")
 )
 
 func main() {
-	emailFlag := flag.String("email", "", "email for the user to add")
-	nameFlag := flag.String("name", "", "name of the user to add")
-	adminFlag := flag.Bool("admin", false, "true if user is admin user")
-	realmID := flag.Uint("realm", 0, "realm to add the user to")
-	realmAdminFlag := flag.Bool("admin-realm", false, "realm to add the user to")
-
 	flag.Parse()
 
+	ctx, done := signalcontext.OnInterrupt()
+
+	debug, _ := strconv.ParseBool(os.Getenv("LOG_DEBUG"))
+	logger := logging.NewLogger(debug)
+	ctx = logging.WithLogger(ctx, logger)
+
+	err := realMain(ctx)
+	done()
+
+	if err != nil {
+		logger.Fatal(err)
+	}
+}
+
+func realMain(ctx context.Context) error {
+	logger := logging.FromContext(ctx)
+
 	if len(flag.Args()) > 0 {
-		log.Fatal("Received unexpected arguments:", flag.Args())
+		return fmt.Errorf("unexpected arguments: %v", flag.Args())
 	}
 
 	if *emailFlag == "" {
-		log.Fatal("--email must be passed and cannot be empty")
+		return fmt.Errorf("--email must be passed and cannot be empty")
 	}
 
-	ctx := context.Background()
-	var config database.Config
-	if err := envconfig.Process(ctx, &config); err != nil {
-		log.Fatalf("config error: %v", err)
+	var cfg database.Config
+	if err := config.ProcessWith(ctx, &cfg, envconfig.OsLookuper()); err != nil {
+		return fmt.Errorf("failed to process config: %w", err)
 	}
 
-	db, err := config.Open(ctx)
+	db, err := cfg.Load(ctx)
 	if err != nil {
-		log.Fatalf("db connection failed: %v", err)
+		return fmt.Errorf("failed to load database config: %w", err)
+	}
+	if err := db.Open(ctx); err != nil {
+		return fmt.Errorf("failed to connect to database: %w", err)
 	}
 	defer db.Close()
 
 	userRealm, err := findRealm(db, *realmID)
 	if err != nil {
-		log.Fatalf("unable to find specified realmID: %v reason: %v", *realmID, err)
+		return fmt.Errorf("unable to find specified realmID: %v reason: %w", *realmID, err)
 	}
 
 	if userRealm == nil && !*adminFlag {
-		log.Fatalf("Cannot create a non system admin user that is also not in any realms")
+		return fmt.Errorf("cannot create a non system admin user that is also not in any realms")
 	}
 
-	user, err := db.CreateUser(*emailFlag, *nameFlag, *adminFlag)
-	if err == gorm.ErrRecordNotFound {
-		log.Fatalf("unexpected error: %v", err)
+	user := &database.User{
+		Name:  *nameFlag,
+		Email: *emailFlag,
+		Admin: *adminFlag,
 	}
-	log.Printf("saved user: %+v", user)
 
 	if userRealm != nil {
-		userRealm.AddUser(user)
+		user.AddRealm(userRealm)
 		if *realmAdminFlag {
-			userRealm.AddAdminUser(user)
-		}
-		if err := db.SaveRealm(userRealm); err != nil {
-			log.Fatalf("failed to add user %v to realm %v; %v", user.Email, userRealm.Name, err)
+			user.AddRealmAdmin(userRealm)
 		}
 	}
+
+	if err := db.SaveUser(user); err != nil {
+		return fmt.Errorf("failed to save user: %w: %v", err, user.ErrorMessages())
+	}
+	logger.Infow("saved user", "user", user)
+
+	return nil
 }
 
 func findRealm(db *database.Database, id uint) (*database.Realm, error) {

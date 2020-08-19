@@ -23,7 +23,10 @@ import (
 	"io/ioutil"
 	"net/http"
 
-	"github.com/google/exposure-notifications-verification-server/pkg/logging"
+	"github.com/google/exposure-notifications-server/pkg/logging"
+
+	"go.opencensus.io/plugin/ochttp"
+	"go.opencensus.io/plugin/ochttp/propagation/tracecontext"
 )
 
 // MakeRequest uses an HTTP client to send and receive JSON based on interface{}.
@@ -34,6 +37,12 @@ func MakeRequest(ctx context.Context, client *http.Client, url string, headers h
 		return err
 	}
 
+	// Set transport to have tracing data.
+	client.Transport = &ochttp.Transport{
+		Base:        client.Transport,
+		Propagation: &tracecontext.HTTPFormat{},
+	}
+
 	buffer := bytes.NewBuffer(data)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, buffer)
@@ -41,12 +50,18 @@ func MakeRequest(ctx context.Context, client *http.Client, url string, headers h
 		return fmt.Errorf("creating request: %w", err)
 	}
 	req.Header = headers
-	req.Header.Add("content-type", "application/json")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
 	r, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("sending request: %w", err)
 	}
 	defer r.Body.Close()
+
+	logger.Debugf("http status: %s (%d)", http.StatusText(r.StatusCode), r.StatusCode)
+	for k, v := range r.Header {
+		logger.Debugf("response header: %q: %v", k, v)
+	}
 
 	body, err := ioutil.ReadAll(r.Body)
 	if err != nil {

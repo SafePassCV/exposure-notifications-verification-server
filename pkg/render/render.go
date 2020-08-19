@@ -20,11 +20,29 @@ import (
 	"context"
 	"fmt"
 	"html/template"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 
-	"github.com/google/exposure-notifications-verification-server/pkg/logging"
+	"github.com/google/exposure-notifications-server/pkg/logging"
+
 	"go.uber.org/zap"
 )
+
+// allowedResponseCodes are the list of allowed response codes. This is
+// primarily here to catch if someone, in the future, accidentially includes a
+// bad status code.
+var allowedResponseCodes = map[int]struct{}{
+	200: {},
+	400: {},
+	401: {},
+	404: {},
+	405: {},
+	413: {},
+	429: {},
+	500: {},
+}
 
 // Renderer is responsible for rendering various content and templates like HTML
 // and JSON responses.
@@ -44,11 +62,11 @@ type Renderer struct {
 	// function for (re)loading templates. templatesLock is a mutex to prevent
 	// concurrent modification of the templates field.
 	templates     *template.Template
-	templatesGlob string
+	templatesRoot string
 }
 
 // New creates a new renderer with the given details.
-func New(ctx context.Context, glob string, debug bool) (*Renderer, error) {
+func New(ctx context.Context, root string, debug bool) (*Renderer, error) {
 	logger := logging.FromContext(ctx)
 
 	r := &Renderer{
@@ -59,7 +77,7 @@ func New(ctx context.Context, glob string, debug bool) (*Renderer, error) {
 				return bytes.NewBuffer(make([]byte, 0, 1024))
 			},
 		},
-		templatesGlob: glob,
+		templatesRoot: root,
 	}
 
 	// Load initial templates
@@ -72,15 +90,48 @@ func New(ctx context.Context, glob string, debug bool) (*Renderer, error) {
 
 // loadTemplates loads or reloads all templates.
 func (r *Renderer) loadTemplates() error {
-	if r.templatesGlob == "" {
+	if r.templatesRoot == "" {
 		return nil
 	}
 
-	tmpl, err := template.ParseGlob(r.templatesGlob)
-	if err != nil {
+	tmpl := template.New("").
+		Option("missingkey=zero").
+		Funcs(templateFuncs())
+	if err := loadTemplates(tmpl, r.templatesRoot); err != nil {
 		return fmt.Errorf("failed to load templates: %w", err)
 	}
-	tmpl = tmpl.Option("missingkey=zero")
+
 	r.templates = tmpl
 	return nil
+}
+
+func loadTemplates(tmpl *template.Template, root string) error {
+	return filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+
+		if info.IsDir() {
+			return nil
+		}
+
+		if _, err := tmpl.ParseFiles(path); err != nil {
+			return fmt.Errorf("failed to parse %s: %w", path, err)
+		}
+
+		return nil
+	})
+}
+
+func templateFuncs() template.FuncMap {
+	return map[string]interface{}{
+		"joinStrings": strings.Join,
+	}
+}
+
+// AllowedResponseCode returns true if the code is a permitted response code,
+// false otherwise.
+func (r *Renderer) AllowedResponseCode(code int) bool {
+	_, ok := allowedResponseCodes[code]
+	return ok
 }

@@ -20,8 +20,10 @@ import (
 
 	"github.com/google/exposure-notifications-verification-server/pkg/config"
 	"github.com/google/exposure-notifications-verification-server/pkg/controller"
-	"github.com/google/exposure-notifications-verification-server/pkg/logging"
 	"github.com/google/exposure-notifications-verification-server/pkg/render"
+
+	"github.com/google/exposure-notifications-server/pkg/logging"
+
 	"github.com/gorilla/csrf"
 	"github.com/gorilla/mux"
 )
@@ -29,8 +31,6 @@ import (
 // ConfigureCSRF injects the CSRF handling and populates the global template map
 // with the csrfToken and csrfTemplate.
 func ConfigureCSRF(ctx context.Context, config *config.ServerConfig, h *render.Renderer) mux.MiddlewareFunc {
-	logger := logging.FromContext(ctx).Named("middleware.ConfigureCSRF")
-
 	// TODO(mikehelmick) - there are more configuration options for CSRF
 	// protection.
 	protect := csrf.Protect(config.CSRFAuthKey,
@@ -55,7 +55,6 @@ func ConfigureCSRF(ctx context.Context, config *config.ServerConfig, h *render.R
 			ctx = controller.WithTemplateMap(ctx, m)
 			*r = *r.WithContext(ctx)
 
-			logger.Debugw("done")
 			next.ServeHTTP(w, r)
 		}))
 	}

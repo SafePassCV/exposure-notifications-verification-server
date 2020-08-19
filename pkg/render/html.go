@@ -38,6 +38,20 @@ func (r *Renderer) RenderHTML(w http.ResponseWriter, tmpl string, data interface
 // The buffers are fetched via a sync.Pool to reduce allocations and improve
 // performance.
 func (r *Renderer) RenderHTMLStatus(w http.ResponseWriter, code int, tmpl string, data interface{}) {
+	// Hello there reader! If you've made it here, you're likely wondering why
+	// you're getting an error about response codes. For client-interop, it's very
+	// important that we retain and maintain the allowed list of response codes.
+	// Adding a new response code requires coordination with the client team so
+	// they can update their applications to handle that new response code.
+	if !r.AllowedResponseCode(code) {
+		r.logger.Errorw("unregistered response code", "code", code)
+
+		w.WriteHeader(http.StatusInternalServerError)
+		msg := fmt.Sprintf("%d is not a registered response code", code)
+		fmt.Fprintf(w, htmlErrTmpl, msg)
+		return
+	}
+
 	if r.templates == nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		fmt.Fprintf(w, htmlErrTmpl, "No templates are defined")
@@ -72,8 +86,8 @@ func (r *Renderer) RenderHTMLStatus(w http.ResponseWriter, code int, tmpl string
 	}
 
 	// Rendering worked, flush to the response
-	w.WriteHeader(code)
 	w.Header().Set("Content-Type", "text/html; charset=UTF-8")
+	w.WriteHeader(code)
 	if _, err := b.WriteTo(w); err != nil {
 		// We couldn't write the buffer. We can't change the response header or
 		// content type if we got this far, so the best option we have is to log the

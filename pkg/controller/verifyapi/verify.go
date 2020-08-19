@@ -31,11 +31,11 @@ import (
 	"github.com/google/exposure-notifications-verification-server/pkg/controller"
 	"github.com/google/exposure-notifications-verification-server/pkg/database"
 	"github.com/google/exposure-notifications-verification-server/pkg/jwthelper"
-	"github.com/google/exposure-notifications-verification-server/pkg/logging"
 	"github.com/google/exposure-notifications-verification-server/pkg/render"
 	"github.com/google/exposure-notifications-verification-server/pkg/signer"
 
 	verifyapi "github.com/google/exposure-notifications-server/pkg/api/v1"
+	"github.com/google/exposure-notifications-server/pkg/logging"
 
 	"github.com/dgrijalva/jwt-go"
 	"go.uber.org/zap"
@@ -74,7 +74,8 @@ func (c *Controller) HandleVerify() http.Handler {
 
 		var request api.VerifyCodeRequest
 		if err := controller.BindJSON(w, r, &request); err != nil {
-			c.h.RenderJSON(w, http.StatusOK, api.Error(err))
+			c.logger.Errorw("bad request", "error", err)
+			c.h.RenderJSON(w, http.StatusBadRequest, api.Error(err).WithCode(api.ErrUnparsableRequest))
 			return
 		}
 
@@ -82,21 +83,35 @@ func (c *Controller) HandleVerify() http.Handler {
 		signer, err := c.signer.NewSigner(ctx, c.config.TokenSigningKey)
 		if err != nil {
 			c.logger.Errorw("failed to get signer", "error", err)
-			c.h.RenderJSON(w, http.StatusInternalServerError, nil)
+			c.h.RenderJSON(w, http.StatusInternalServerError, api.InternalError())
+			return
+		}
+
+		// Process and validate the requested acceptable test types.
+		acceptTypes, err := request.GetAcceptedTestTypes()
+		if err != nil {
+			c.logger.Errorf("invalid accept test types", "error", err)
+			c.h.RenderJSON(w, http.StatusBadRequest, api.Error(err).WithCode(api.ErrInvalidTestType))
 			return
 		}
 
 		// Exchange the short term verification code for a long term verification token.
 		// The token can be used to sign TEKs later.
-		verificationToken, err := c.db.VerifyCodeAndIssueToken(authApp.RealmID, request.VerificationCode, c.config.VerificationTokenDuration)
+		verificationToken, err := c.db.VerifyCodeAndIssueToken(authApp.RealmID, request.VerificationCode, acceptTypes, c.config.VerificationTokenDuration)
 		if err != nil {
 			c.logger.Errorw("failed to issue verification token", "error", err)
-			if errors.Is(err, database.ErrVerificationCodeExpired) || errors.Is(err, database.ErrVerificationCodeUsed) {
-				c.h.RenderJSON(w, http.StatusBadRequest, api.Error(err))
-				return
+			switch {
+			case errors.Is(err, database.ErrVerificationCodeExpired):
+				c.h.RenderJSON(w, http.StatusBadRequest, api.Errorf("verification code expired").WithCode(api.ErrTokenExpired))
+			case errors.Is(err, database.ErrVerificationCodeUsed):
+				c.h.RenderJSON(w, http.StatusBadRequest, api.Errorf("verification code invalid").WithCode(api.ErrTokenInvalid))
+			case errors.Is(err, database.ErrVerificationCodeNotFound):
+				c.h.RenderJSON(w, http.StatusBadRequest, api.Errorf("verification code invalid").WithCode(api.ErrTokenInvalid))
+			case errors.Is(err, database.ErrUnsupportedTestType):
+				c.h.RenderJSON(w, http.StatusPreconditionFailed, api.Errorf("verification code has unsupported test type").WithCode(api.ErrUnsupportedTestType))
+			default:
+				c.h.RenderJSON(w, http.StatusInternalServerError, api.InternalError())
 			}
-
-			c.h.RenderJSON(w, http.StatusInternalServerError, nil)
 			return
 		}
 
@@ -115,7 +130,7 @@ func (c *Controller) HandleVerify() http.Handler {
 		signedJWT, err := jwthelper.SignJWT(token, signer)
 		if err != nil {
 			c.logger.Errorw("failed to sign token", "error", err)
-			c.h.RenderJSON(w, http.StatusBadRequest, api.Error(err))
+			c.h.RenderJSON(w, http.StatusBadRequest, api.Error(err).WithCode(api.ErrInternal))
 			return
 		}
 

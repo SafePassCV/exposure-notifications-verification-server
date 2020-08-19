@@ -19,43 +19,59 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"os"
+	"strconv"
 
+	"github.com/google/exposure-notifications-verification-server/pkg/config"
 	"github.com/google/exposure-notifications-verification-server/pkg/database"
-	"github.com/google/exposure-notifications-verification-server/pkg/logging"
+
+	"github.com/google/exposure-notifications-server/pkg/logging"
+
 	_ "github.com/jinzhu/gorm/dialects/postgres"
 	"github.com/sethvargo/go-envconfig"
 	"github.com/sethvargo/go-signalcontext"
 )
 
+var (
+	targetFlag   = flag.String("id", "", "migration ID to move to")
+	rollbackFlag = flag.Bool("rollback", false, "if true, will run a rollback migration towards the target")
+)
+
 func main() {
-	target := flag.String("id", "", "migration ID to move to")
-	rollback := flag.Bool("rollback", false, "if true, will run a rollback migration towards the target")
 	flag.Parse()
+
 	ctx, done := signalcontext.OnInterrupt()
 
-	err := realMain(ctx, *target, *rollback)
+	debug, _ := strconv.ParseBool(os.Getenv("LOG_DEBUG"))
+	logger := logging.NewLogger(debug)
+	ctx = logging.WithLogger(ctx, logger)
+
+	err := realMain(ctx)
 	done()
 
-	logger := logging.FromContext(ctx)
 	if err != nil {
 		logger.Fatal(err)
 	}
-	logger.Info("migrations complete")
 }
 
-func realMain(ctx context.Context, target string, rollback bool) error {
-	var config database.Config
-	if err := envconfig.Process(ctx, &config); err != nil {
+func realMain(ctx context.Context) error {
+	logger := logging.FromContext(ctx)
+	var dbConfig database.Config
+	if err := config.ProcessWith(ctx, &dbConfig, envconfig.OsLookuper()); err != nil {
 		return fmt.Errorf("failed to process config: %w", err)
 	}
+	logger.Debugw("running migrate", "dbconfig", dbConfig)
 
-	db, err := config.Open(ctx)
+	db, err := dbConfig.Load(ctx)
 	if err != nil {
+		return fmt.Errorf("failed to load database config: %w", err)
+	}
+	if err := db.Open(ctx); err != nil {
 		return fmt.Errorf("failed to connect to database: %w", err)
 	}
 	defer db.Close()
 
-	if err := db.MigrateTo(ctx, target, rollback); err != nil {
+	if err := db.MigrateTo(ctx, *targetFlag, *rollbackFlag); err != nil {
 		return fmt.Errorf("failed to run migrations: %w", err)
 	}
 

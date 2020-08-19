@@ -22,12 +22,12 @@ import (
 
 	"github.com/google/exposure-notifications-verification-server/pkg/config"
 	"github.com/google/exposure-notifications-verification-server/pkg/database"
-	"github.com/google/exposure-notifications-verification-server/pkg/logging"
 	"github.com/google/exposure-notifications-verification-server/pkg/render"
 	"github.com/google/exposure-notifications-verification-server/pkg/signer"
 
 	verifyapi "github.com/google/exposure-notifications-server/pkg/api/v1"
 	"github.com/google/exposure-notifications-server/pkg/cache"
+	"github.com/google/exposure-notifications-server/pkg/logging"
 
 	"github.com/dgrijalva/jwt-go"
 	"go.uber.org/zap"
@@ -88,7 +88,7 @@ func (c *Controller) validateToken(verToken string, publicKey crypto.PublicKey) 
 		if kid == c.config.TokenSigningKeyID {
 			return publicKey, nil
 		}
-		return nil, fmt.Errorf("no public key for pecified 'kid' not found: %v", kid)
+		return nil, fmt.Errorf("no public key for specified 'kid' not found: %v", kid)
 	})
 	if err != nil {
 		c.logger.Errorf("invalid verification token: %v", err)

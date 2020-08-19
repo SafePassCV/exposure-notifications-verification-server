@@ -20,8 +20,9 @@ import (
 
 	"github.com/google/exposure-notifications-verification-server/pkg/config"
 	"github.com/google/exposure-notifications-verification-server/pkg/database"
-	"github.com/google/exposure-notifications-verification-server/pkg/logging"
 	"github.com/google/exposure-notifications-verification-server/pkg/render"
+
+	"github.com/google/exposure-notifications-server/pkg/logging"
 
 	"go.uber.org/zap"
 )
@@ -34,7 +35,7 @@ type Controller struct {
 }
 
 func New(ctx context.Context, config *config.ServerConfig, db *database.Database, h *render.Renderer) *Controller {
-	logger := logging.FromContext(ctx)
+	logger := logging.FromContext(ctx).Named("apikey")
 
 	return &Controller{
 		config: config,

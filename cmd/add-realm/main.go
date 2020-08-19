@@ -20,52 +20,64 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strconv"
 
+	"github.com/google/exposure-notifications-verification-server/pkg/config"
 	"github.com/google/exposure-notifications-verification-server/pkg/database"
+
+	"github.com/google/exposure-notifications-server/pkg/logging"
+
 	"github.com/sethvargo/go-envconfig"
 	"github.com/sethvargo/go-signalcontext"
 )
 
 var (
-	name = flag.String("name", "", "name of the realm to add")
+	nameFlag = flag.String("name", "", "name of the realm to add")
 )
 
 func main() {
+	flag.Parse()
+
 	ctx, done := signalcontext.OnInterrupt()
+
+	debug, _ := strconv.ParseBool(os.Getenv("LOG_DEBUG"))
+	logger := logging.NewLogger(debug)
+	ctx = logging.WithLogger(ctx, logger)
+
 	err := realMain(ctx)
 	done()
 
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "%s\n", err.Error())
-		os.Exit(1)
+		logger.Fatal(err)
 	}
 }
 
 func realMain(ctx context.Context) error {
-	flag.Parse()
+	logger := logging.FromContext(ctx)
 
-	if *name == "" {
+	if *nameFlag == "" {
 		return fmt.Errorf("--name must be passed and cannot be empty")
 	}
 
-	var config database.Config
-	if err := envconfig.Process(ctx, &config); err != nil {
-		return fmt.Errorf("failed to parse config: %w", err)
+	var cfg database.Config
+	if err := config.ProcessWith(ctx, &cfg, envconfig.OsLookuper()); err != nil {
+		return fmt.Errorf("failed to process config: %w", err)
 	}
 
-	db, err := config.Open(ctx)
+	db, err := cfg.Load(ctx)
 	if err != nil {
+		return fmt.Errorf("failed to load database config: %w", err)
+	}
+	if err := db.Open(ctx); err != nil {
 		return fmt.Errorf("failed to connect to database: %w", err)
 	}
 	defer db.Close()
 
-	realm := database.Realm{
-		Name: *name,
-	}
-	if err := db.SaveRealm(&realm); err != nil {
+	realm := database.NewRealmWithDefaults(*nameFlag)
+	if err := db.SaveRealm(realm); err != nil {
 		return fmt.Errorf("failed to create realm: %w", err)
 	}
 
-	fmt.Printf("successfully created realm %v (%v)\n", realm.Name, realm.ID)
+	logger.Infow("created realm", "realm", realm)
 	return nil
 }

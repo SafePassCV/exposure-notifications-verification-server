@@ -21,11 +21,13 @@ import (
 	"net/http"
 	"time"
 
-	"firebase.google.com/go/auth"
 	"github.com/google/exposure-notifications-verification-server/pkg/controller"
 	"github.com/google/exposure-notifications-verification-server/pkg/database"
-	"github.com/google/exposure-notifications-verification-server/pkg/logging"
 	"github.com/google/exposure-notifications-verification-server/pkg/render"
+
+	"github.com/google/exposure-notifications-server/pkg/logging"
+
+	"firebase.google.com/go/auth"
 	"github.com/gorilla/mux"
 	"github.com/jinzhu/gorm"
 )
@@ -84,22 +86,25 @@ func RequireAuth(ctx context.Context, client *auth.Client, db *database.Database
 				return
 			}
 
-			user, err := db.FindUser(email)
+			user, err := db.FindUserByEmail(email)
 			if err != nil {
 				if errors.Is(err, gorm.ErrRecordNotFound) {
 					logger.Debugw("user does not exist")
 					flash.Error("That user does not exist.")
+					controller.ClearSessionFirebaseCookie(session)
 					controller.Unauthorized(w, r, h)
 					return
 				}
 
 				logger.Errorw("failed to find user", "error", err)
+				controller.ClearSessionFirebaseCookie(session)
 				controller.InternalError(w, r, h, err)
 				return
 			}
 
 			if user == nil {
 				logger.Debugw("user does not exist")
+				controller.ClearSessionFirebaseCookie(session)
 				controller.Unauthorized(w, r, h)
 				return
 			}
@@ -129,7 +134,6 @@ func RequireAuth(ctx context.Context, client *auth.Client, db *database.Database
 			ctx = controller.WithUser(ctx, user)
 			*r = *r.WithContext(ctx)
 
-			logger.Debugw("done")
 			next.ServeHTTP(w, r)
 		})
 	}
@@ -156,7 +160,6 @@ func RequireAdmin(ctx context.Context, h *render.Renderer) mux.MiddlewareFunc {
 				return
 			}
 
-			logger.Debugw("done")
 			next.ServeHTTP(w, r)
 		})
 	}

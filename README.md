@@ -30,7 +30,7 @@ for the verification system, this server:
 	 * Please see the documentation for the [HMAC Calculation](https://developers.google.com/android/exposure-notifications/verification-system#hmac-calc)
 	 * The Verification Certificate is also a JWT
 
-![Verification Flow](https://developers.google.com/android/exposure-notifications/images/verification-certificate-hmac-flow-diagram.png)
+![Verification Flow](https://developers.google.com/android/exposure-notifications/images/verification-flow.svg)
 
 Architecture details
 
@@ -89,25 +89,41 @@ export FIREBASE_PROJECT_ID="YOUR-PROJECT-123456"
 export FIREBASE_MESSAGE_SENDER_ID="789123456"
 export FIREBASE_APP_ID="1:123456:web:abcd1234"
 export FIREBASE_MEASUREMENT_ID="G-J12345C"
-
 export FIREBASE_AUTH_DOMAIN="${FIREBASE_PROJECT_ID}.firebaseapp.com"
 export FIREBASE_DATABASE_URL="https://${FIREBASE_PROJECT_ID}.firebaseio.com"
 export FIREBASE_STORAGE_BUCKET="${FIREBASE_PROJECT_ID}.appspot.com"
+export FIREBASE_TERMS_OF_SERVICE_URL="https://example.com"
+export FIREBASE_PRIVACY_POLICY_URL="https://example.com"
 
 export TOKEN_SIGNING_KEY="<Token Key Resource ID from Above>"
 export CERTIFICATE_SIGNING_KEY="<Certificate Key Resource ID from Above>"
 
+# Disable observability locally
+export OBSERVABILITY_EXPORTER="NOOP"
 
 # D/L SA from Firebase https://console.firebase.google.com/project/project-name-123456/settings/serviceaccounts/adminsdk
 export GOOGLE_APPLICATION_CREDENTIALS=/Users/USERNAME/Documents/project-name-123456-firebase-adminsdk-ab3-4cde56f78g.json
 
 # Configure CSRF_AUTH_KEY. This is a 32 byte string base64 encoded.
-# Create your own with `openssl rand -base64 32 | tr -d '\n'`
+# Create your own with `openssl rand -base64 32`.
 export CSRF_AUTH_KEY="aGVsbG9oZWxsb2hlbGxvaGVsbG9oZWxsb2hlbGxvaGk="
 
 # Configure cookie encryption, the first is 64 bytes, the second is 32.
-# Create your own with `openssl rand -base64 NUM | tr -d '\n'` where NUM is 32 or 64
+# Create your own with `openssl rand -base64 NUM` where NUM is 32 or 64
 export COOKIE_KEYS="M+yP18fJL7e/afWNdvDrHXPRq7BC1T0zlQPHAwNbeEJmp35y7dSTxvhARKLGYzH6DuIUe0uFqsK5XQtGMl8SuQ==,3PBCfkE6aFzq9UQbtzXUOJ4rta5RsYjxtrMz4j41xiE="
+
+# Database encryption key - this is required for values that are encrypted in
+# the database (like SMS configuration) because we need the plaintext value in
+# some instances.
+# Create your own with `openssl rand -base64 32`.
+export KEY_MANAGER="IN_MEMORY"
+export DB_ENCRYPTION_KEY="O04ZjG4WuoceRd0k2pTqDN0r8omr6sbFL0U3T5b12Lo="
+
+# Database HMAC keys - these should be at least 64 bytes, preferably 128
+# Create your own with `openssl rand -base64 128`.
+export DB_APIKEY_DATABASE_KEY="02zaT2Gtx1QfBnS7kxlby5TxbwyMPWqoCpb75zA8MMB8frQX0WVpOl+UaXDwE3jz2fj/eFqmCj75atLL6Gw3Yg=="
+export DB_APIKEY_SIGNATURE_KEY="PsOkeJ+1iXN2bMnKKTH6Ea+KtZGKDHhDN7SpBgPGanEOr7b/heFPS90mHbjqtu2htuCt/kW61ar2BQPhtq+ASw=="
+export DB_VERIFICATION_CODE_DATABASE_KEY="F1lVUOZYknxojwslyUPkkq1e4urzWBn4E1ecg/qgu8eVaMU+revTQ/VGvR67dlgpWuzH+/YuyfuVgPLBU9xRdw=="
 
 # Enable dev mode
 export DEV_MODE=1
@@ -125,6 +141,19 @@ go run ./cmd/add-realm --name "my-custom-realm"
 go run ./cmd/add-users --email YOUR-NAME@DOMAIN.com --name "First Last" --admin --realm 1 --admin-realm
 
 go run ./cmd/server
+```
+
+If you see an error like:
+
+```text
+Your application has authenticated using end user credentials from the Google Cloud SDK or Google Cloud Shell which are not supported by the identitytoolkit.googleapis.com
+```
+
+Try installing the firebase-cli and authenticating:
+
+```text
+brew install firebase-cli
+firebase login
 ```
 
 ### Observability (Tracing and Metrics)
@@ -205,6 +234,29 @@ client **MUST NOT** process. Client's should sporadically issue chaff requests.
       "Error": ""
     }
     ```
+
+#### API Response Codes
+
+-   `400` - The client made a bad/invalid request. Search the JSON response body
+    for the `"errors"` key. The body may be empty.
+
+-   `401` - The client is unauthorized. This could be an invalid API key or
+    revoked permissions. This usually has no `"errors"` key, but clients can try
+    to read the JSON body to see if there's additional information (it may be
+    empty)
+
+-   `404` - The client made a request to an invalid URL (routing error). Do not
+    retry.
+
+-   `405` - The client used the wrong HTTP verb. Do not retry.
+
+-   `429` - The client is rate limited. Check the `X-Retry-After` header to
+    determine when to retry the request. Clients can also monitor the
+    `X-RateLimit-Remaining` header that's returned with all responses to
+    determine their rate limit and rate limit expiration.
+
+-   `5xx` - Internal server error. Clients should retry with a reasonable
+    backoff algorithm and maximum cap.
 
 
 ### Test Utilities

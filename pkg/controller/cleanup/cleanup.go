@@ -23,10 +23,10 @@ import (
 
 	"github.com/google/exposure-notifications-verification-server/pkg/config"
 	"github.com/google/exposure-notifications-verification-server/pkg/database"
-	"github.com/google/exposure-notifications-verification-server/pkg/logging"
 	"github.com/google/exposure-notifications-verification-server/pkg/render"
 
 	"github.com/google/exposure-notifications-server/pkg/cache"
+	"github.com/google/exposure-notifications-server/pkg/logging"
 
 	"go.uber.org/zap"
 )
@@ -65,7 +65,7 @@ func (c *Controller) shouldCleanup() error {
 		// in case this was not found, create a new record.
 		cStatCache, err = c.db.CreateCleanup(database.CleanupName)
 		if err != nil {
-			return fmt.Errorf("error attempting to backfil cleanup config: %v", err)
+			return fmt.Errorf("error attempting to backfill cleanup config: %v", err)
 		}
 	}
 
